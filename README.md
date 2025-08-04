@@ -1,0 +1,1 @@
+# Annotated-Arabic-English-Receipt-Dataset-Classification
