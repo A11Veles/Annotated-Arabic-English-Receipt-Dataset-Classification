@@ -1,10 +1,14 @@
-name: t6-environment
+name: velesenv
 channels:
+  - pytorch
   - conda-forge
   - defaults
 dependencies:
   - python=3.12
   - pandas
-  - scikit-learn
   - numpy
-  - llama-cpp-python
+  - scikit-learn
+  - pytorch
+  - pip
+  - pip:
+    - sentence-transformers
