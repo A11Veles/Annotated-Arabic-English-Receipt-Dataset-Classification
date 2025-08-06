@@ -8,9 +8,13 @@ from sklearn.metrics.pairwise import cosine_similarity
 import os
 import re
 import warnings
+import sys
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, parent_dir)
+from config.config import *
 warnings.filterwarnings("ignore")
 
-model = SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')
+model = SentenceTransformer(MODEL_NAME)
 model.eval()
 
 def normalize_text(text):
@@ -23,20 +27,12 @@ def normalize_text(text):
     #delete special characters
     text = re.sub(r'[^\w\s]', ' ', text)
     
-    noise_words = {
-        # English noise words
-        'gram', 'gm', 'ml', 'pieces', 'kg', 'g', 'pcs', 'liter', 'l', 'pack', 'bottle', 'can', 'box', 'piece', 'jar', 'bag', 'carton', 'packet', 'case', 'each', 'per', 'unit', 'weight', 'x', 'with', 'natural', 'pure', 'fresh', 'hot', 'small', 'mix',
-        # Arabic noise words
-        'جم', 'مل', 'لتر', 'جرام', 'كجم', 'ق', 'ك', 'م', 'قطع', 'قطعة', 'ج',
-        'علبه', 'كانز', 'بلاستيك', 'زجاج', 'زجاجه', 'عبوة', 'باكو', 'كيس',
-        'وزن', 'من', 'ساده', 'حار', 'فريش', 'طبيعى', 'طبيعي', 'صغير', 'كبير', 'جديد', 'ميكس'
-    }
-    words = [w for w in text.split() if w not in noise_words and len(w) > 1]
+    words = [w for w in text.split() if w not in NOISE_WORDS and len(w) > 1]
     
     #remove extra whitespace
     return ' '.join(words).strip()
 
-def apply_minimum_threshold(df, min_threshold=10):
+def apply_minimum_threshold(df, min_threshold=MIN_THRESHOLD):
     """Move categories below threshold to 'Other' category"""
     class_counts = df['class'].value_counts()
     rare_categories = class_counts[class_counts < min_threshold].index.tolist()
@@ -63,34 +59,8 @@ def preprocess_categories(categories, return_mapping=False):
         corrected_cat = norm_cat.replace('stationary', 'stationery')
         corrected[orig_cat] = corrected_cat
     
-    #Key is the preferred category name, values are variations to merge
-    merge_map = {
-        'vegetables and fruits': [
-            'vegetables and fruits', 
-            'fruits', 
-            'vegetables and herbs',
-        ],
-        'tea coffee and hot drinks': [
-            'tea coffee and hot drinks',
-            'tea and coffee',
-        ],
-        'sauces dressings and condiments': [
-            'sauces dressings and condiments',
-            'condiments dressings and marinades',
-        ],
-        'chocolates sweets and desserts': [
-            'chocolates sweets and desserts',
-            'sweets and desserts',
-        ],
-        'beef and meat': [
-            'beef and processed meat',
-            'beef and lamb meat',
-        ],
-        'personal care and body care': [
-            'personal care skin and body care',
-            'hair shower bath and soap',
-        ],
-    }
+    #Use merge map from config
+    merge_map = CATEGORY_MERGE_MAP
     
     #create a reverse mapping (key is each variation, value is the category it's mapped to)
     item_to_category = {}
@@ -133,10 +103,10 @@ def predict_category(item_embedding, category_embeddings, categories):
 
 def main():
     print("Loading data...")
-    df = pd.read_csv("train.csv")
+    df = pd.read_csv(TRAIN_DATA_PATH)
     
     print("Applying minimum sample threshold...")
-    df = apply_minimum_threshold(df, min_threshold=10)
+    df = apply_minimum_threshold(df)
     
     original_categories = [cat for cat in df['class'].unique() if pd.notna(cat) and isinstance(cat, str)]
     print(f"Found {len(original_categories)} unique categories before preprocessing")
@@ -149,14 +119,14 @@ def main():
     df_filtered['preprocessed_class'] = df_filtered['class'].map(category_mapping).fillna(df_filtered['class'])
     print(f"Using all {len(all_categories)} categories with {len(df_filtered)} items (full dataset)")
     
-    os.makedirs("final_results", exist_ok=True)
-    if os.path.exists("final_results/evaluations.txt"):
-        os.remove("final_results/evaluations.txt")
+    os.makedirs(RESULTS_DIR, exist_ok=True)
+    if os.path.exists(EVALUATIONS_FILE):
+        os.remove(EVALUATIONS_FILE)
     
     print("Generating category embeddings...")
     category_embeddings = get_embeddings(all_categories)
     
-    batch_size = 1000
+    batch_size = BATCH_SIZE
     results = []
     total_items = len(df_filtered)
     
@@ -183,27 +153,27 @@ def main():
         
         print(f"Processed {min(i + batch_size, total_items)}/{total_items} items")
         
-        #save intermediate results every 5000 items
-        if (i + batch_size) % 5000 == 0 or i + batch_size >= total_items:
-            checkpoint_number = str(((i + batch_size) // 5000)).zfill(3)
+        #save intermediate results every checkpoint interval
+        if (i + batch_size) % CHECKPOINT_INTERVAL == 0 or i + batch_size >= total_items:
+            checkpoint_number = str(((i + batch_size) // CHECKPOINT_INTERVAL)).zfill(3)
             
             temp_df = pd.DataFrame(results)
-            temp_df.to_csv(f"final_results/checkpoint_{checkpoint_number}.csv", index=False)
+            temp_df.to_csv(f"{RESULTS_DIR}/checkpoint_{checkpoint_number}.csv", index=False)
             
             y_true_checkpoint = temp_df['true_category'].astype(str)
             y_pred_checkpoint = temp_df['predicted_category'].astype(str)
             
             #dummy classifier
-            dummy_clf = DummyClassifier(strategy="most_frequent")
+            dummy_clf = DummyClassifier(strategy=EVALUATION_CONFIG['dummy_strategy'])
             dummy_clf.fit(y_true_checkpoint.values.reshape(-1, 1), y_true_checkpoint)
             y_dummy_checkpoint = dummy_clf.predict(y_true_checkpoint.values.reshape(-1, 1))
             
-            f1_model_checkpoint = f1_score(y_true_checkpoint, y_pred_checkpoint, average='weighted', zero_division=0)
-            f1_dummy_checkpoint = f1_score(y_true_checkpoint, y_dummy_checkpoint, average='weighted', zero_division=0)
+            f1_model_checkpoint = f1_score(y_true_checkpoint, y_pred_checkpoint, average=EVALUATION_CONFIG['f1_average'], zero_division=EVALUATION_CONFIG['zero_division'])
+            f1_dummy_checkpoint = f1_score(y_true_checkpoint, y_dummy_checkpoint, average=EVALUATION_CONFIG['f1_average'], zero_division=EVALUATION_CONFIG['zero_division'])
             improvement = f1_model_checkpoint - f1_dummy_checkpoint
             
             # Append to evaluation file
-            with open("final_results/evaluations.txt", "a") as f:
+            with open(EVALUATIONS_FILE, "a") as f:
                 if i == 0:  # First checkpoint, write header
                     f.write("Checkpoint Evaluations - Embedding-based Classification\n")
                     f.write("========================================================\n\n")
@@ -220,12 +190,12 @@ def main():
     y_true = results_df['true_category'].astype(str)
     y_pred = results_df['predicted_category'].astype(str)
     
-    dummy_clf = DummyClassifier(strategy="most_frequent")
+    dummy_clf = DummyClassifier(strategy=EVALUATION_CONFIG['dummy_strategy'])
     dummy_clf.fit(y_true.values.reshape(-1, 1), y_true)
     y_dummy = dummy_clf.predict(y_true.values.reshape(-1, 1))
     
-    f1_model = f1_score(y_true, y_pred, average='weighted', zero_division=0)
-    f1_dummy = f1_score(y_true, y_dummy, average='weighted', zero_division=0)
+    f1_model = f1_score(y_true, y_pred, average=EVALUATION_CONFIG['f1_average'], zero_division=EVALUATION_CONFIG['zero_division'])
+    f1_dummy = f1_score(y_true, y_dummy, average=EVALUATION_CONFIG['f1_average'], zero_division=EVALUATION_CONFIG['zero_division'])
     
     print(f"\n=== EVALUATION RESULTS ===")
     print(f"Model F1 Score: {f1_model:.3f}")
@@ -233,10 +203,10 @@ def main():
     print(f"Improvement: {f1_model - f1_dummy:.3f}")
     
     # Save final results
-    results_df.to_csv("final_results/embedding_predictions.csv", index=False)
+    results_df.to_csv(f"{RESULTS_DIR}/embedding_predictions.csv", index=False)
     
     # Append final summary to evaluations file
-    with open("final_results/evaluations.txt", "a") as f:
+    with open(EVALUATIONS_FILE, "a") as f:
         f.write("="*60 + "\n")
         f.write("FINAL RESULTS - FULL DATASET\n")
         f.write("="*60 + "\n\n")
@@ -251,7 +221,7 @@ def main():
         for i, cat in enumerate(sorted(valid_categories), 1):
             f.write(f"{i:2d}. {cat}\n")
     
-    print(f"\nFinal results saved to final_results/")
+    print(f"\nFinal results saved to {RESULTS_DIR}/")
 
 
 main()
